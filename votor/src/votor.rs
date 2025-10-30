@@ -234,7 +234,6 @@ impl Votor {
             exit: exit.clone(),
             start: start.clone(),
             cluster_info: cluster_info.clone(),
-            my_vote_pubkey: vote_account,
             blockstore,
             sharable_banks,
             leader_schedule_cache,

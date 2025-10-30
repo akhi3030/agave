@@ -40,7 +40,6 @@ pub(crate) struct ConsensusPoolContext {
     pub(crate) start: Arc<(Mutex<bool>, Condvar)>,
 
     pub(crate) cluster_info: Arc<ClusterInfo>,
-    pub(crate) my_vote_pubkey: Pubkey,
     pub(crate) blockstore: Arc<Blockstore>,
     pub(crate) sharable_banks: SharableBanks,
     pub(crate) leader_schedule_cache: Arc<LeaderScheduleCache>,
@@ -158,7 +157,7 @@ impl ConsensusPoolService {
             Self::add_message_and_maybe_update_commitment(
                 &root_bank,
                 my_pubkey,
-                &ctx.my_vote_pubkey,
+                &ctx.cluster_info.id(),
                 message,
                 consensus_pool,
                 events,
@@ -490,7 +489,6 @@ mod tests {
             exit: exit.clone(),
             start: Arc::new((Mutex::new(true), Condvar::new())),
             cluster_info: Arc::new(cluster_info),
-            my_vote_pubkey: Pubkey::new_unique(),
             blockstore: Arc::new(blockstore),
             sharable_banks: sharable_banks.clone(),
             leader_schedule_cache: leader_schedule_cache.clone(),
