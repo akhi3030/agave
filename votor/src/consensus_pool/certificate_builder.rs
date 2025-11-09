@@ -2,10 +2,72 @@ use {
     crate::common::{certificate_limits_and_vote_types, VoteType},
     agave_votor_messages::consensus_message::{Certificate, CertificateType, VoteMessage},
     bitvec::prelude::*,
-    solana_bls_signatures::{BlsError, SignatureProjective},
+    solana_bls_signatures::{BlsError, Signature as BLSSignature, SignatureProjective},
     solana_signer_store::{encode_base2, encode_base3, EncodeError},
+    std::collections::BTreeMap,
     thiserror::Error,
 };
+
+#[derive(Debug, PartialEq, Eq, Error)]
+pub(super) enum Foo {
+    #[error("called with empty btreemap")]
+    EmptyBTreeMap,
+    #[error("BLS error: {0}")]
+    Bls(#[from] BlsError),
+    #[error("Encoding failed: {0:?}")]
+    Encode(EncodeError),
+}
+
+pub(super) fn build_sig_and_bitmap(
+    base_votes: &BTreeMap<u16, VoteMessage>,
+    fallback_votes: Option<&BTreeMap<u16, VoteMessage>>,
+) -> Result<(BLSSignature, Vec<u8>), Foo> {
+    let max_base_rank = match base_votes.last_key_value() {
+        None => return Err(Foo::EmptyBTreeMap),
+        Some((rank, _)) => *rank,
+    };
+    let max_rank = match fallback_votes {
+        None => max_base_rank,
+        Some(fv) => match fv.last_key_value() {
+            None => return Err(Foo::EmptyBTreeMap),
+            Some((fv_rank, _)) => max_base_rank.max(*fv_rank),
+        },
+    } as usize;
+
+    let base_bitmap =
+        base_votes
+            .keys()
+            .fold(BitVec::repeat(false, max_rank), |mut bitmap, rank| {
+                bitmap.set(*rank as usize, true);
+                bitmap
+            });
+    let fallback_bitmap = fallback_votes.map(|vs| {
+        vs.keys()
+            .fold(BitVec::repeat(false, max_rank), |mut bitmap, rank| {
+                bitmap.set(*rank as usize, true);
+                bitmap
+            })
+    });
+
+    let base_sigs = base_votes.values().map(|v| &v.signature);
+    // XXX: panics below.
+    let mut signature = SignatureProjective::identity();
+    match fallback_votes {
+        None => {
+            signature.aggregate_with(base_sigs)?;
+        }
+        Some(fvs) => {
+            let sigs = base_sigs.chain(fvs.values().map(|v| &v.signature));
+            signature.aggregate_with(sigs)?;
+        }
+    }
+
+    let bitmap = match fallback_bitmap {
+        None => encode_base2(&base_bitmap).map_err(Foo::Encode)?,
+        Some(bitmap) => encode_base3(&base_bitmap, &bitmap).map_err(Foo::Encode)?,
+    };
+    Ok((signature.into(), bitmap))
+}
 
 /// Maximum number of validators in a certificate
 ///
