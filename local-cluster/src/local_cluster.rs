@@ -12,6 +12,7 @@ use {
     log::*,
     solana_account::{Account, AccountSharedData, ReadableAccount},
     solana_accounts_db::utils::create_accounts_run_and_snapshot_dirs,
+    solana_bls_signatures::keypair::Keypair as BLSKeypair,
     solana_client::connection_cache::ConnectionCache,
     solana_clock::{Slot, DEFAULT_DEV_SLOTS_PER_EPOCH, DEFAULT_TICKS_PER_SLOT},
     solana_cluster_type::ClusterType,
@@ -298,6 +299,7 @@ impl LocalCluster {
                                 node_keypair: node_keypair.insecure_clone(),
                                 vote_keypair: vote_keypair.insecure_clone(),
                                 stake_keypair: Keypair::new(),
+                                bls_keypair: BLSKeypair::new(),
                             },
                             stake,
                         ))

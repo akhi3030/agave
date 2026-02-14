@@ -70,14 +70,18 @@ pub struct ValidatorVoteKeypairs {
     pub node_keypair: Keypair,
     pub vote_keypair: Keypair,
     pub stake_keypair: Keypair,
+    pub bls_keypair: BLSKeypair,
 }
 
 impl ValidatorVoteKeypairs {
     pub fn new(node_keypair: Keypair, vote_keypair: Keypair, stake_keypair: Keypair) -> Self {
+        let bls_keypair =
+            BLSKeypair::derive_from_signer(&vote_keypair, BLS_KEYPAIR_DERIVE_SEED).unwrap();
         Self {
             node_keypair,
             vote_keypair,
             stake_keypair,
+            bls_keypair,
         }
     }
 
@@ -86,6 +90,7 @@ impl ValidatorVoteKeypairs {
             node_keypair: Keypair::new(),
             vote_keypair: Keypair::new(),
             stake_keypair: Keypair::new(),
+            bls_keypair: BLSKeypair::new(),
         }
     }
 }
