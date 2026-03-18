@@ -122,23 +122,17 @@ pub(crate) struct ConsensusPool {
     /// Slot stake counters, used to calculate safe_to_notar and safe_to_skip
     slot_stake_counters_map: BTreeMap<Slot, SlotStakeCounters>,
     /// Stores details about the genesis vote during the migration
-    migration_status: Option<Arc<MigrationStatus>>,
+    migration_status: Arc<MigrationStatus>,
 }
 
 impl ConsensusPool {
-    pub(crate) fn new_from_root_bank_pre_migration(
+    pub(crate) fn new(
         my_pubkey: Pubkey,
         bank: &Bank,
         migration_status: Arc<MigrationStatus>,
     ) -> Self {
-        let mut pool = Self::new_from_root_bank(my_pubkey, bank);
-        pool.migration_status = Some(migration_status);
-        pool
-    }
-
-    pub fn new_from_root_bank(my_pubkey: Pubkey, bank: &Bank) -> Self {
         // To account for genesis and snapshots we allow default block id until
-        // block id can be serialized  as part of the snapshot
+        // block id can be serialized as part of the snapshot
         let root_block = (bank.slot(), bank.block_id().unwrap_or_default());
         let parent_ready_tracker = ParentReadyTracker::new(my_pubkey, root_block);
 
@@ -151,7 +145,7 @@ impl ConsensusPool {
             parent_ready_tracker,
             stats: ConsensusPoolStats::default(),
             slot_stake_counters_map: BTreeMap::new(),
-            migration_status: None,
+            migration_status,
         }
     }
 
@@ -347,8 +341,14 @@ impl ConsensusPool {
                 }
             }
             CertificateType::Genesis(slot, block_id) => {
-                if let Some(ref migration_status) = self.migration_status {
-                    migration_status.set_genesis_certificate(cert);
+                debug_assert!(!self.migration_status.is_alpenglow_enabled());
+                if self.migration_status.is_alpenglow_enabled() {
+                    warn!(
+                        "{}: received genesis cert with slot={slot} block_id={block_id} after alpenglow has been enabled.",
+                        self.my_pubkey
+                    );
+                } else {
+                    self.migration_status.set_genesis_certificate(cert);
                 }
                 // The genesis block is automatically certified
                 self.parent_ready_tracker
@@ -736,7 +736,11 @@ mod tests {
         let root_bank = bank_forks.read().unwrap().root_bank();
         (
             validator_keypairs,
-            ConsensusPool::new_from_root_bank(Pubkey::new_unique(), &root_bank),
+            ConsensusPool::new(
+                Pubkey::new_unique(),
+                &root_bank,
+                Arc::new(MigrationStatus::default()),
+            ),
             bank_forks,
         )
     }
@@ -1885,9 +1889,10 @@ mod tests {
             .map(|_| ValidatorVoteKeypairs::new_rand())
             .collect::<Vec<_>>();
         let bank_forks = create_bank_forks(&validator_keypairs);
-        let mut pool = ConsensusPool::new_from_root_bank(
+        let mut pool = ConsensusPool::new(
             Pubkey::new_unique(),
             &bank_forks.read().unwrap().root_bank(),
+            Arc::new(MigrationStatus::default()),
         );
 
         let root_bank = bank_forks.read().unwrap().root_bank();

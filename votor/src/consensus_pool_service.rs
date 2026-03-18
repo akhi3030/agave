@@ -187,15 +187,8 @@ impl ConsensusPoolService {
 
         // Unlike the other votor threads, consensus pool starts even before alpenglow is enabled
         // As it is required to track the Genesis Vote.
-        let mut consensus_pool = if ctx.migration_status.is_alpenglow_enabled() {
-            ConsensusPool::new_from_root_bank(my_pubkey, &root_bank)
-        } else {
-            ConsensusPool::new_from_root_bank_pre_migration(
-                my_pubkey,
-                &root_bank,
-                ctx.migration_status.clone(),
-            )
-        };
+        let mut consensus_pool =
+            ConsensusPool::new(my_pubkey, &root_bank, ctx.migration_status.clone());
 
         info!("{}: Certificate pool loop starting", &my_pubkey);
         let mut stats = ConsensusPoolServiceStats::new();
@@ -512,7 +505,8 @@ mod tests {
                 Arc::new(LeaderScheduleCache::new_from_bank(&sharable_banks.root()));
 
             let root_bank = sharable_banks.root();
-            let consensus_pool = ConsensusPool::new_from_root_bank(my_pubkey, &root_bank);
+            let consensus_pool =
+                ConsensusPool::new(my_pubkey, &root_bank, Arc::new(MigrationStatus::default()));
             let my_vote_pubkey = Pubkey::new_unique();
 
             TestContext {
