@@ -43,7 +43,10 @@ use {
             },
         },
         bank_forks::BankForks,
-        block_component_processor::{BlockComponentProcessor, vote_reward::VoteRewardAccountState},
+        block_component_processor::{
+            BlockComponentProcessor,
+            vote_reward::epoch_inflation_account_state::EpochInflationAccountState,
+        },
         epoch_stakes::{
             BLSPubkeyToRankMap, DeserializableVersionedEpochStakes, NodeVoteAccounts,
             VersionedEpochStakes,
@@ -1785,7 +1788,7 @@ impl Bank {
             .feature_set
             .is_active(&agave_feature_set::alpenglow::id())
         {
-            VoteRewardAccountState::new_epoch_update_account(
+            EpochInflationAccountState::new_epoch_update_account(
                 self,
                 parent_epoch,
                 parent_capitalization,
