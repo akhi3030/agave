@@ -2,7 +2,6 @@
 
 use {
     crate::epoch_stakes::VersionedEpochStakes,
-    log::error,
     solana_clock::Epoch,
     solana_instruction::error::InstructionError,
     solana_pubkey::Pubkey,
@@ -26,7 +25,8 @@ pub struct PointValue {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct CalculatedStakePoints {
-    pub(crate) points: u128,
+    pub(crate) tower_points: u128,
+    pub(crate) ag_points: u128,
     pub(crate) new_credits_observed: u64,
     pub(crate) force_credits_update_with_skipped_reward: bool,
 }
@@ -128,16 +128,32 @@ fn calculate_stake_points(
         stake_history,
         inflation_point_calc_tracer,
         new_rate_activation_epoch,
-        &None,
+        &AlpenglowStakeState::Calculating,
     )
-    .points
+    .tower_points
 }
 
-/// State needed to compute rewards for alpenglow.
+/// Alpenglow related state needed in `calculate_stake_points_and_credits`.
 #[derive(Debug)]
-pub(crate) struct AlpenglowStakeState<'a> {
-    /// `epoch_stakes` from the current bank.
-    pub(crate) epoch_stakes: &'a HashMap<Epoch, VersionedEpochStakes>,
+pub(crate) enum AlpenglowStakeState<'a> {
+    /// Function is called for calculating rewards.
+    Calculating,
+    /// Function is called when Tower is active for the entire epoch.
+    Tower,
+    /// Function is called when we migrate from Tower to Alpenglow.
+    Migrating {
+        /// Pubkey for the vote account of the validator that the stake is delegated to.
+        vote_pubkey: Pubkey,
+        /// `epoch_stakes` from the current bank.
+        epoch_stakes: &'a HashMap<Epoch, VersionedEpochStakes>,
+    },
+    /// Function is called when Alpenglow is active for the entire epoch.
+    Alpenglow {
+        /// Pubkey for the vote account of the validator that the stake is delegated to.
+        vote_pubkey: Pubkey,
+        /// `epoch_stakes` from the current bank.
+        epoch_stakes: &'a HashMap<Epoch, VersionedEpochStakes>,
+    },
 }
 
 /// Different errors possible in `AlpenglowStakeState::get_total_stake()`.
@@ -160,12 +176,11 @@ pub enum GetTotalStakeError {
 impl<'a> AlpenglowStakeState<'a> {
     /// Returns the total stake delegated to `self.vote_pubkey` in the given epoch.
     fn get_total_stake(
-        &self,
-        epoch: Epoch,
         vote_pubkey: Pubkey,
+        epoch_stakes: &HashMap<Epoch, VersionedEpochStakes>,
+        epoch: Epoch,
     ) -> Result<u64, GetTotalStakeError> {
-        let rank_map = self
-            .epoch_stakes
+        let rank_map = epoch_stakes
             .get(&epoch)
             .ok_or(GetTotalStakeError::NoEpochStakes { epoch })?
             .bls_pubkey_to_rank_map();
@@ -183,6 +198,152 @@ impl<'a> AlpenglowStakeState<'a> {
     }
 }
 
+fn tower_epoch_credits_iter(
+    stake: &Stake,
+    epoch_credits_iter: impl Iterator<Item = (Epoch, u64, u64)>,
+    stake_history: &StakeHistory,
+    inflation_point_calc_tracer: Option<impl Fn(&InflationPointCalculationEvent)>,
+    new_rate_activation_epoch: Option<Epoch>,
+) -> (u128, u64) {
+    let mut points = 0;
+    let credits_in_stake = stake.credits_observed;
+    let mut new_credits_observed = credits_in_stake;
+
+    for (epoch, final_epoch_credits, initial_epoch_credits) in epoch_credits_iter {
+        let stake_amount = u128::from(stake.delegation.stake(
+            epoch,
+            stake_history,
+            new_rate_activation_epoch,
+        ));
+
+        // figure out how much this stake has seen that
+        //   for which the vote account has a record
+        let earned_credits = if credits_in_stake < initial_epoch_credits {
+            // the staker observed the entire epoch
+            final_epoch_credits - initial_epoch_credits
+        } else if credits_in_stake < final_epoch_credits {
+            // the staker registered sometime during the epoch, partial credit
+            final_epoch_credits - new_credits_observed
+        } else {
+            // the staker has already observed or been redeemed this epoch
+            //  or was activated after this epoch
+            0
+        };
+        let earned_credits = u128::from(earned_credits);
+
+        // don't want to assume anything about order of the iterator...
+        new_credits_observed = new_credits_observed.max(final_epoch_credits);
+
+        // finally calculate points for this epoch
+        let earned_points = stake_amount * earned_credits;
+        points += earned_points;
+
+        if let Some(inflation_point_calc_tracer) = inflation_point_calc_tracer.as_ref() {
+            inflation_point_calc_tracer(&InflationPointCalculationEvent::CalculatedPoints(
+                epoch,
+                stake_amount,
+                earned_credits,
+                earned_points,
+            ));
+        }
+    }
+    (points, new_credits_observed)
+}
+
+fn ag_epoch_credits_iter(
+    stake: &Stake,
+    epoch_credits_iter: impl Iterator<Item = (Epoch, u64, u64)>,
+    stake_history: &StakeHistory,
+    inflation_point_calc_tracer: Option<impl Fn(&InflationPointCalculationEvent)>,
+    new_rate_activation_epoch: Option<Epoch>,
+    vote_pubkey: Pubkey,
+    epoch_stakes: &HashMap<Epoch, VersionedEpochStakes>,
+) -> (u128, u64) {
+    let mut points = 0;
+    let credits_in_stake = stake.credits_observed;
+    let mut new_credits_observed = credits_in_stake;
+
+    for (epoch, final_epoch_credits, initial_epoch_credits) in epoch_credits_iter {
+        let stake_amount = u128::from(stake.delegation.stake(
+            epoch,
+            stake_history,
+            new_rate_activation_epoch,
+        ));
+
+        // figure out how much this stake has seen that
+        //   for which the vote account has a record
+        let earned_credits = if credits_in_stake < initial_epoch_credits {
+            // the staker observed the entire epoch
+            final_epoch_credits - initial_epoch_credits
+        } else if credits_in_stake < final_epoch_credits {
+            // the staker registered sometime during the epoch, partial credit
+            final_epoch_credits - new_credits_observed
+        } else {
+            // the staker has already observed or been redeemed this epoch
+            //  or was activated after this epoch
+            0
+        };
+        let earned_credits = u128::from(earned_credits);
+
+        // don't want to assume anything about order of the iterator...
+        new_credits_observed = new_credits_observed.max(final_epoch_credits);
+
+        let earned_points = {
+            if earned_credits == 0 {
+                earned_credits
+            } else {
+                let total_stake =
+                    AlpenglowStakeState::get_total_stake(vote_pubkey, epoch_stakes, epoch).unwrap();
+                earned_credits * stake_amount / total_stake as u128
+            }
+        };
+        points += earned_points;
+        if let Some(inflation_point_calc_tracer) = inflation_point_calc_tracer.as_ref() {
+            inflation_point_calc_tracer(&InflationPointCalculationEvent::CalculatedPoints(
+                epoch,
+                stake_amount,
+                earned_credits,
+                earned_points,
+            ));
+        }
+    }
+    (points, new_credits_observed)
+}
+
+fn migrating_epoch_credits_iter(
+    stake: &Stake,
+    mut epoch_credits_iter: impl Iterator<Item = (Epoch, u64, u64)>,
+    stake_history: &StakeHistory,
+    inflation_point_calc_tracer: Option<impl Fn(&InflationPointCalculationEvent)>,
+    new_rate_activation_epoch: Option<Epoch>,
+    vote_pubkey: Pubkey,
+    epoch_stakes: &HashMap<Epoch, VersionedEpochStakes>,
+) -> (u128, u128, u64) {
+    let tower = epoch_credits_iter
+        .by_ref()
+        .take_while(|(epoch, _, _)| *epoch != Epoch::MAX);
+    let (tower_points, tower_new_credits_observed) = tower_epoch_credits_iter(
+        stake,
+        tower,
+        stake_history,
+        inflation_point_calc_tracer.as_ref(),
+        new_rate_activation_epoch,
+    );
+
+    let (ag_points, ag_new_credits_observed) = ag_epoch_credits_iter(
+        stake,
+        epoch_credits_iter,
+        stake_history,
+        inflation_point_calc_tracer,
+        new_rate_activation_epoch,
+        vote_pubkey,
+        epoch_stakes,
+    );
+
+    let new_credits_observed = tower_new_credits_observed.max(ag_new_credits_observed);
+    (tower_points, ag_points, new_credits_observed)
+}
+
 /// for a given stake and vote_state, calculate how many
 ///   points were earned (credits * stake) and new value
 ///   for credits_observed were the points paid
@@ -192,7 +353,7 @@ pub(crate) fn calculate_stake_points_and_credits(
     stake_history: &StakeHistory,
     inflation_point_calc_tracer: Option<impl Fn(&InflationPointCalculationEvent)>,
     new_rate_activation_epoch: Option<Epoch>,
-    ag_stake_state: &Option<AlpenglowStakeState>,
+    ag_stake_state: &AlpenglowStakeState,
 ) -> CalculatedStakePoints {
     let credits_in_stake = stake.credits_observed;
     let credits_in_vote = vote_state.credits;
@@ -221,7 +382,8 @@ pub(crate) fn calculate_stake_points_and_credits(
 
             // hint with true to indicate some exceptional credits handling is needed
             return CalculatedStakePoints {
-                points: 0,
+                tower_points: 0,
+                ag_points: 0,
                 new_credits_observed: credits_in_vote,
                 force_credits_update_with_skipped_reward: true,
             };
@@ -232,7 +394,8 @@ pub(crate) fn calculate_stake_points_and_credits(
             }
             // don't hint caller and return current value if credits remain unchanged (= delinquent)
             return CalculatedStakePoints {
-                points: 0,
+                tower_points: 0,
+                ag_points: 0,
                 new_credits_observed: credits_in_stake,
                 force_credits_update_with_skipped_reward: false,
             };
@@ -240,99 +403,48 @@ pub(crate) fn calculate_stake_points_and_credits(
         Ordering::Greater => {}
     }
 
-    let mut points = 0;
-    let mut new_credits_observed = credits_in_stake;
-
-    for epoch_credits_item in vote_state.epoch_credits_iter {
-        let (epoch, final_epoch_credits, initial_epoch_credits) = epoch_credits_item;
-        let stake_amount = u128::from(stake.delegation.stake(
-            epoch,
-            stake_history,
-            new_rate_activation_epoch,
-        ));
-
-        // figure out how much this stake has seen that
-        //   for which the vote account has a record
-        let earned_credits = if credits_in_stake < initial_epoch_credits {
-            // the staker observed the entire epoch
-            final_epoch_credits - initial_epoch_credits
-        } else if credits_in_stake < final_epoch_credits {
-            // the staker registered sometime during the epoch, partial credit
-            final_epoch_credits - new_credits_observed
-        } else {
-            // the staker has already observed or been redeemed this epoch
-            //  or was activated after this epoch
-            0
-        };
-        let earned_credits = u128::from(earned_credits);
-
-        // don't want to assume anything about order of the iterator...
-        new_credits_observed = new_credits_observed.max(final_epoch_credits);
-
-        // finally calculate points for this epoch
-        let earned_points = match &ag_stake_state {
-            None => {
-                // in tower, the stake has to be included to calculate the total points this `vote_state` earned.
-                stake_amount * earned_credits
-            }
-            Some(state) => {
-                // in alpenglow, points represent the total reward that this `vote_state` has earned.
-                // `earned_credits` has already taken the stake into account.  It still has to be
-                // scaled by the stake that this staker delegated to the `vote_state`.
-                if earned_credits == 0 {
-                    // If earned_credits is 0, no need to look up total stake which can potentially fail.
-                    earned_credits
-                } else {
-                    // the earned_credits needs to be scaled by the portion of this staker's delegation.
-                    let total_stake =
-                        match state.get_total_stake(epoch, stake.delegation.voter_pubkey) {
-                            Ok(t) => t,
-                            Err(e) => {
-                                // assuming that we only do the calculations for the latest epoch, this
-                                // failure should be unlikely.
-                                let message = format!(
-                                    "get_total_stake(epoch={epoch}, voter={}) failed with {e:?}. \
-                                     Rewards payout will be skipped",
-                                    stake.delegation.voter_pubkey
-                                );
-                                error!("{message}");
-                                datapoint_error!(
-                                    "PER-total-stake-calculation-failure",
-                                    ("error", message, String)
-                                );
-                                if let Some(inflation_point_calc_tracer) =
-                                    inflation_point_calc_tracer.as_ref()
-                                {
-                                    inflation_point_calc_tracer(
-                                        &SkippedReason::GetTotalStakeFailed(e).into(),
-                                    );
-                                }
-                                return CalculatedStakePoints {
-                                    points: 0,
-                                    new_credits_observed,
-                                    force_credits_update_with_skipped_reward: true,
-                                };
-                            }
-                        };
-                    earned_credits * stake_amount / total_stake as u128
-                }
-            }
-        };
-
-        points += earned_points;
-
-        if let Some(inflation_point_calc_tracer) = inflation_point_calc_tracer.as_ref() {
-            inflation_point_calc_tracer(&InflationPointCalculationEvent::CalculatedPoints(
-                epoch,
-                stake_amount,
-                earned_credits,
-                earned_points,
-            ));
+    let (points, ag_points, new_credits_observed) = match ag_stake_state {
+        AlpenglowStakeState::Calculating | AlpenglowStakeState::Tower => {
+            let (points, credits) = tower_epoch_credits_iter(
+                stake,
+                vote_state.epoch_credits_iter,
+                stake_history,
+                inflation_point_calc_tracer,
+                new_rate_activation_epoch,
+            );
+            (points, 0, credits)
         }
-    }
-
+        AlpenglowStakeState::Migrating {
+            vote_pubkey,
+            epoch_stakes,
+        } => migrating_epoch_credits_iter(
+            stake,
+            vote_state.epoch_credits_iter,
+            stake_history,
+            inflation_point_calc_tracer,
+            new_rate_activation_epoch,
+            *vote_pubkey,
+            epoch_stakes,
+        ),
+        AlpenglowStakeState::Alpenglow {
+            vote_pubkey,
+            epoch_stakes,
+        } => {
+            let (ag_points, credits) = ag_epoch_credits_iter(
+                stake,
+                vote_state.epoch_credits_iter,
+                stake_history,
+                inflation_point_calc_tracer,
+                new_rate_activation_epoch,
+                *vote_pubkey,
+                epoch_stakes,
+            );
+            (0, ag_points, credits)
+        }
+    };
     CalculatedStakePoints {
-        points,
+        tower_points: points,
+        ag_points,
         new_credits_observed,
         force_credits_update_with_skipped_reward: false,
     }

@@ -7,7 +7,10 @@ use {
         StakeRewardCalculation, epoch_rewards_hasher::hash_rewards_into_partitions,
     },
     crate::{
-        bank::{RewardCalcTracer, RewardCalculationEvent, RewardsMetrics, null_tracer},
+        bank::{
+            AlpenglowEpochStatus, RewardCalcTracer, RewardCalculationEvent, RewardsMetrics,
+            null_tracer,
+        },
         inflation_rewards::{
             points::{
                 AlpenglowStakeState, CalculationEnvironment, DelegatedVoteState, PointValue,
@@ -36,16 +39,6 @@ use {
     solana_sysvar::epoch_rewards::EpochRewards,
     std::sync::{Arc, atomic::Ordering::Relaxed},
 };
-
-/// Returned from `Bank::is_alpenglow_active_in_epoch()`.
-enum AlpenglowEpochStatus {
-    /// This is a full tower epoch
-    Tower,
-    /// The epoch started in tower and then switched to alpenglow
-    MigrationEpoch,
-    /// This is a full alpenglow epoch
-    FullAlpenglow,
-}
 
 #[derive(Debug)]
 struct DelegationRewards {
@@ -468,7 +461,7 @@ impl Bank {
         new_rate_activation_epoch: Option<Epoch>,
         delay_commission_updates: bool,
         commission_rate_in_basis_points: bool,
-        ag_activation_status: &AlpenglowEpochStatus,
+        ag_epoch_status: &AlpenglowEpochStatus,
     ) -> Option<DelegationRewards> {
         // curry closure to add the contextual stake_pubkey
         let reward_calc_tracer = reward_calc_tracer.as_ref().map(|outer| {
@@ -516,13 +509,16 @@ impl Bank {
             vote_state.commission() as u16 * 100
         };
 
-        let ag_stake_state = match ag_activation_status {
-            AlpenglowEpochStatus::Tower => None,
-            // TODO: handle rewards migration epoch.  Currently it is treated as tower.
-            AlpenglowEpochStatus::MigrationEpoch => None,
-            AlpenglowEpochStatus::FullAlpenglow => Some(AlpenglowStakeState {
+        let ag_stake_state = match ag_epoch_status {
+            AlpenglowEpochStatus::Tower => AlpenglowStakeState::Tower,
+            AlpenglowEpochStatus::FullAlpenglow => AlpenglowStakeState::Alpenglow {
+                vote_pubkey,
                 epoch_stakes: &self.epoch_stakes,
-            }),
+            },
+            AlpenglowEpochStatus::MigrationEpoch => AlpenglowStakeState::Migrating {
+                vote_pubkey,
+                epoch_stakes: &self.epoch_stakes,
+            },
         };
 
         match redeem_rewards(
@@ -565,7 +561,7 @@ impl Bank {
     }
 
     /// Returns the status of alpenglow activation in `epoch`.
-    fn is_alpenglow_active_in_epoch(&self, epoch: Epoch) -> AlpenglowEpochStatus {
+    pub(crate) fn is_alpenglow_active_in_epoch(&self, epoch: Epoch) -> AlpenglowEpochStatus {
         let Some(genesis_cert) = self.get_alpenglow_genesis_certificate() else {
             return AlpenglowEpochStatus::Tower;
         };

@@ -36,7 +36,7 @@ pub(crate) fn redeem_rewards<'a>(
     calculation_environment: CalculationEnvironment<'a>,
     inflation_point_calc_tracer: Option<impl Fn(&InflationPointCalculationEvent)>,
     stake_account_lamports_for_trace: u64,
-    ag_stake_state: Option<AlpenglowStakeState>,
+    ag_stake_state: AlpenglowStakeState,
 ) -> Result<(u64, u64, Stake), InstructionError> {
     if let StakeStateV2::Stake(_meta, stake, _stake_flags) = stake_state {
         if let Some(inflation_point_calc_tracer) = inflation_point_calc_tracer.as_ref() {
@@ -93,7 +93,7 @@ fn redeem_stake_rewards<'a>(
     vote_state: DelegatedVoteState,
     calculation_environment: CalculationEnvironment<'a>,
     inflation_point_calc_tracer: Option<impl Fn(&InflationPointCalculationEvent)>,
-    ag_stake_state: Option<AlpenglowStakeState>,
+    ag_stake_state: AlpenglowStakeState,
 ) -> Option<(u64, u64)> {
     if let Some(inflation_point_calc_tracer) = inflation_point_calc_tracer.as_ref() {
         inflation_point_calc_tracer(&InflationPointCalculationEvent::CreditsObserved(
@@ -138,7 +138,7 @@ fn calculate_stake_rewards<'a>(
     vote_state: DelegatedVoteState,
     calculation_environment: CalculationEnvironment<'a>,
     inflation_point_calc_tracer: Option<impl Fn(&InflationPointCalculationEvent)>,
-    ag_stake_state: Option<AlpenglowStakeState>,
+    ag_stake_state: AlpenglowStakeState,
 ) -> Option<CalculatedStakeRewards> {
     let CalculationEnvironment {
         stake_history,
@@ -150,7 +150,8 @@ fn calculate_stake_rewards<'a>(
 
     // ensure to run to trigger (optional) inflation_point_calc_tracer
     let CalculatedStakePoints {
-        points,
+        tower_points,
+        ag_points,
         new_credits_observed,
         mut force_credits_update_with_skipped_reward,
     } = calculate_stake_points_and_credits(
@@ -185,7 +186,7 @@ fn calculate_stake_rewards<'a>(
         });
     }
 
-    if points == 0 {
+    if tower_points == 0 && ag_points == 0 {
         if let Some(inflation_point_calc_tracer) = inflation_point_calc_tracer.as_ref() {
             inflation_point_calc_tracer(&SkippedReason::ZeroPoints.into());
         }
@@ -198,18 +199,29 @@ fn calculate_stake_rewards<'a>(
         return None;
     }
 
-    let rewards = if ag_stake_state.is_some() {
-        // In alpenglow, `points` represents the actual reward that this `vote_state` earned.
-        points
-    } else {
-        // In tower, `points` still needs to be scaled by `point_value` to calculate this
-        // `vote_state` earned.
-        // The final unwrap is safe, as points_value.points is guaranteed to be non zero above.
-        points
-            .checked_mul(u128::from(point_value.rewards))
-            .expect("Rewards intermediate calculation should fit within u128")
-            .checked_div(point_value.points)
-            .unwrap()
+    let rewards = match ag_stake_state {
+        AlpenglowStakeState::Alpenglow { .. } => {
+            // In alpenglow, `points` represents the actual reward that this `vote_state` earned.
+            ag_points
+        }
+        AlpenglowStakeState::Tower | AlpenglowStakeState::Calculating => {
+            // In tower, `points` still needs to be scaled by `point_value` to calculate this
+            // `vote_state` earned.
+            // The final unwrap is safe, as points_value.points is guaranteed to be non zero above.
+            tower_points
+                .checked_mul(u128::from(point_value.rewards))
+                .expect("Rewards intermediate calculation should fit within u128")
+                .checked_div(point_value.points)
+                .unwrap()
+        }
+        AlpenglowStakeState::Migrating { .. } => {
+            tower_points
+                .checked_mul(u128::from(point_value.rewards))
+                .expect("Rewards intermediate calculation should fit within u128")
+                .checked_div(point_value.points)
+                .unwrap()
+                + ag_points
+        }
     };
 
     let rewards = u64::try_from(rewards).expect("Rewards should fit within u64");
@@ -346,7 +358,7 @@ mod tests {
                     commission_rate_in_basis_points,
                 },
                 null_tracer(),
-                None,
+                AlpenglowStakeState::Tower,
             )
         );
 
@@ -372,7 +384,7 @@ mod tests {
                     commission_rate_in_basis_points,
                 },
                 null_tracer(),
-                None,
+                AlpenglowStakeState::Tower,
             )
         );
 
@@ -412,7 +424,7 @@ mod tests {
                     commission_rate_in_basis_points,
                 },
                 null_tracer(),
-                None,
+                AlpenglowStakeState::Tower,
             )
         );
 
@@ -442,7 +454,7 @@ mod tests {
                     commission_rate_in_basis_points,
                 },
                 null_tracer(),
-                None,
+                AlpenglowStakeState::Tower,
             )
         );
 
@@ -469,7 +481,7 @@ mod tests {
                     commission_rate_in_basis_points,
                 },
                 null_tracer(),
-                None,
+                AlpenglowStakeState::Tower,
             )
         );
 
@@ -499,7 +511,7 @@ mod tests {
                     commission_rate_in_basis_points,
                 },
                 null_tracer(),
-                None,
+                AlpenglowStakeState::Tower,
             )
         );
 
@@ -527,7 +539,7 @@ mod tests {
                     commission_rate_in_basis_points,
                 },
                 null_tracer(),
-                None,
+                AlpenglowStakeState::Tower,
             )
         );
 
@@ -557,7 +569,7 @@ mod tests {
                     commission_rate_in_basis_points,
                 },
                 null_tracer(),
-                None,
+                AlpenglowStakeState::Tower,
             )
         );
 
@@ -581,7 +593,7 @@ mod tests {
                     commission_rate_in_basis_points,
                 },
                 null_tracer(),
-                None,
+                AlpenglowStakeState::Tower,
             )
         );
         vote_state.set_inflation_rewards_commission_bps(9900);
@@ -602,7 +614,7 @@ mod tests {
                     commission_rate_in_basis_points,
                 },
                 null_tracer(),
-                None,
+                AlpenglowStakeState::Tower,
             )
         );
 
@@ -630,7 +642,7 @@ mod tests {
                     commission_rate_in_basis_points,
                 },
                 null_tracer(),
-                None,
+                AlpenglowStakeState::Tower,
             )
         );
 
@@ -658,13 +670,14 @@ mod tests {
                     commission_rate_in_basis_points,
                 },
                 null_tracer(),
-                None,
+                AlpenglowStakeState::Tower,
             )
         );
 
         assert_eq!(
             CalculatedStakePoints {
-                points: 0,
+                tower_points: 0,
+                ag_points: 0,
                 new_credits_observed: 4,
                 force_credits_update_with_skipped_reward: false,
             },
@@ -674,7 +687,7 @@ mod tests {
                 &StakeHistory::default(),
                 null_tracer(),
                 None,
-                &None
+                &AlpenglowStakeState::Tower
             )
         );
 
@@ -684,7 +697,8 @@ mod tests {
         // this is new behavior 1; return the post-recreation rewound credits from the vote account
         assert_eq!(
             CalculatedStakePoints {
-                points: 0,
+                tower_points: 0,
+                ag_points: 0,
                 new_credits_observed: 4,
                 force_credits_update_with_skipped_reward: true,
             },
@@ -694,14 +708,15 @@ mod tests {
                 &StakeHistory::default(),
                 null_tracer(),
                 None,
-                &None
+                &AlpenglowStakeState::Tower
             )
         );
         // this is new behavior 2; don't hint when credits both from stake and vote are identical
         stake.credits_observed = 4;
         assert_eq!(
             CalculatedStakePoints {
-                points: 0,
+                tower_points: 0,
+                ag_points: 0,
                 new_credits_observed: 4,
                 force_credits_update_with_skipped_reward: false,
             },
@@ -711,7 +726,7 @@ mod tests {
                 &StakeHistory::default(),
                 null_tracer(),
                 None,
-                &None,
+                &AlpenglowStakeState::Tower,
             )
         );
 
@@ -740,7 +755,7 @@ mod tests {
                     commission_rate_in_basis_points,
                 },
                 null_tracer(),
-                None,
+                AlpenglowStakeState::Tower,
             )
         );
 
@@ -769,7 +784,7 @@ mod tests {
                     commission_rate_in_basis_points,
                 },
                 null_tracer(),
-                None,
+                AlpenglowStakeState::Tower,
             )
         );
     }
@@ -799,7 +814,7 @@ mod tests {
                 commission_rate_in_basis_points,
             },
             null_tracer(),
-            None,
+            AlpenglowStakeState::Tower,
         );
     }
 
@@ -837,7 +852,7 @@ mod tests {
                     commission_rate_in_basis_points,
                 },
                 null_tracer(),
-                None,
+                AlpenglowStakeState::Tower,
             )
         );
     }

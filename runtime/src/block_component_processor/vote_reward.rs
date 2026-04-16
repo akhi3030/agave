@@ -1,5 +1,8 @@
 use {
-    crate::{bank::Bank, validated_reward_certificate::ValidatedRewardCert},
+    crate::{
+        bank::{AlpenglowEpochStatus, Bank},
+        validated_reward_certificate::ValidatedRewardCert,
+    },
     epoch_inflation_account_state::{EpochInflationAccountState, EpochInflationState},
     log::info,
     solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
@@ -133,6 +136,7 @@ pub(super) fn calc_vote_rewards_update_vote_states(
             continue;
         };
         if let Some(account_data) = update_vote_account(
+            bank,
             current_epoch,
             reward_slot,
             current_slot_account,
@@ -150,6 +154,7 @@ pub(super) fn calc_vote_rewards_update_vote_states(
         match current_vote_accounts.get(&current_slot_leader_vote_pubkey) {
             Some((_, leader_account)) => {
                 if let Some(account_data) = update_vote_account(
+                    bank,
                     current_epoch,
                     reward_slot,
                     leader_account,
@@ -201,10 +206,41 @@ fn calculate_reward(
     (validator_reward_lamports, leader_reward_lamports)
 }
 
+fn ensure_marker(bank: &Bank, handler: &mut VoteStateHandler, epoch: Epoch) {
+    let marker_epoch = Epoch::MAX;
+    let marker_elem = (marker_epoch, u64::MAX, u64::MAX);
+    let epoch_credits = handler.epoch_credits_mut();
+    match bank.is_alpenglow_active_in_epoch(epoch) {
+        AlpenglowEpochStatus::Tower => (),
+        AlpenglowEpochStatus::FullAlpenglow => {
+            if epoch_credits.is_empty() {
+                epoch_credits.push(marker_elem);
+            }
+        }
+        AlpenglowEpochStatus::MigrationEpoch => match epoch_credits.len() {
+            0 => {
+                epoch_credits.push(marker_elem);
+            }
+            1 => {
+                panic!();
+            }
+            _ => {
+                let ind0 = epoch_credits.len() - 1;
+                let ind1 = epoch_credits.len() - 2;
+                if epoch_credits[ind0].0 == marker_epoch || epoch_credits[ind1].0 == marker_epoch {
+                } else {
+                    epoch_credits.push(marker_elem);
+                }
+            }
+        },
+    }
+}
+
 /// Deserializes the state from the `account` and updates various fields in it.
 ///
 /// If successful, returns the `AccountSharedData` that can be stored back into a `Bank`.
 fn update_vote_account(
+    bank: &Bank,
     current_epoch: Epoch,
     reward_slot: Slot,
     account: &VoteAccount,
@@ -215,7 +251,9 @@ fn update_vote_account(
     let versions = bincode::deserialize(account.account().data()).ok()?;
     let mut handle = VoteStateHandler::try_new_from_vote_state_versions(versions).ok()?;
     update_vote_state(
+        bank,
         &mut handle,
+        current_epoch,
         reward_slot,
         current_epoch,
         reward,
@@ -252,13 +290,16 @@ fn update_vote_account(
 /// - `root_slot` is populated from the footer finalization certificate
 /// - `votes` is populated from the footer rewards aggregate
 fn update_vote_state(
+    bank: &Bank,
     handle: &mut VoteStateHandler,
+    current_epoch: Epoch,
     reward_slot: Slot,
     reward_epoch: Epoch,
     reward: u64,
     validator_vote_pubkey: Pubkey,
     final_cert_input: &Option<(&HashSet<Pubkey>, Slot)>,
 ) {
+    ensure_marker(bank, handle, current_epoch);
     handle.increment_credits(reward_epoch, reward);
     if let Some((signers, slot)) = final_cert_input {
         if signers.contains(&validator_vote_pubkey) {
@@ -389,12 +430,18 @@ mod tests {
 
     #[test]
     fn pay_reward_works() {
+        let num_validators = 3;
+        let validators = (0..num_validators)
+            .map(|_| ValidatorVoteKeypairs::new_rand())
+            .collect::<Vec<_>>();
+        let (bank, _bank_forks) = initial_state(&validators, 0);
         let account =
             VoteAccount::try_from(new_rand_vote_account(&mut rand::rng(), None, true)).unwrap();
         let epoch = 1234;
         let reward = 3453423;
         let account_shared_data =
-            update_vote_account(epoch, 0, &account, Pubkey::default(), reward, &None).unwrap();
+            update_vote_account(&bank, epoch, 0, &account, Pubkey::default(), reward, &None)
+                .unwrap();
         let vote_state = vote_state_from_account(&account_shared_data);
         assert_eq!(reward, vote_state.epoch_credits().last().unwrap().1);
     }
