@@ -808,6 +808,134 @@ mod tests {
     }
 
     #[test]
+    fn calculate_and_pay_updates_signers_when_only_final_cert_is_present() {
+        let validator_keypairs = (0..4)
+            .map(|_| ValidatorVoteKeypairs::new_rand())
+            .collect::<Vec<_>>();
+        let per_validator_stake = LAMPORTS_PER_SOL * 100;
+        let mut genesis_config = create_genesis_config_with_alpenglow_vote_accounts(
+            1_000_000_000,
+            &validator_keypairs,
+            vec![per_validator_stake; validator_keypairs.len()],
+        )
+        .genesis_config;
+        genesis_config.epoch_schedule = EpochSchedule::without_warmup();
+        genesis_config.rent = Rent::default();
+
+        let leader_node_pubkey = validator_keypairs[0].node_keypair.pubkey();
+        let leader_vote_pubkey = validator_keypairs[0].vote_keypair.pubkey();
+        let target_vote_pubkey = validator_keypairs[1].vote_keypair.pubkey();
+        let slot_leader = SlotLeader {
+            id: leader_node_pubkey,
+            vote_address: leader_vote_pubkey,
+        };
+
+        let (prev_bank, _bank_forks) = new_bank_for_tests(slot_leader, &genesis_config);
+        let current_slot = prev_bank
+            .epoch_schedule
+            .get_first_slot_in_epoch(prev_bank.epoch() + 1)
+            + NUM_SLOTS_FOR_REWARD;
+        let bank = new_bank_from_parent(prev_bank.clone(), current_slot);
+
+        let cert_rank = {
+            let rank_map = bank
+                .epoch_stakes_from_slot(bank.slot())
+                .unwrap()
+                .bls_pubkey_to_rank_map();
+            (0..rank_map.len())
+                .find_map(|rank| {
+                    rank_map.get_pubkey_stake_entry(rank).and_then(|entry| {
+                        (entry.vote_account_pubkey == target_vote_pubkey).then_some(rank)
+                    })
+                })
+                .unwrap()
+        };
+        let final_cert = build_fast_finalization_cert(&bank, &[cert_rank]);
+        let (signers, finalize_cert, _) = final_cert.clone().into_parts();
+        let final_cert_input = Some((&signers, finalize_cert.cert_type.slot()));
+
+        calc_vote_rewards_update_vote_states(&bank, None, final_cert_input).unwrap();
+
+        let handle = vote_state_from_bank(&bank, &target_vote_pubkey);
+        assert_eq!(handle.root_slot(), Some(final_cert.slot()));
+        assert_eq!(handle.votes().len(), 1);
+        assert_eq!(
+            handle.votes().front().unwrap().lockout.slot(),
+            final_cert.slot()
+        );
+        assert!(handle.epoch_credits().is_empty());
+    }
+
+    #[test]
+    fn calculate_and_pay_updates_signer_only_in_final_cert_with_both_certs_present() {
+        let validator_keypairs = (0..4)
+            .map(|_| ValidatorVoteKeypairs::new_rand())
+            .collect::<Vec<_>>();
+        let per_validator_stake = LAMPORTS_PER_SOL * 100;
+        let mut genesis_config = create_genesis_config_with_alpenglow_vote_accounts(
+            1_000_000_000,
+            &validator_keypairs,
+            vec![per_validator_stake; validator_keypairs.len()],
+        )
+        .genesis_config;
+        genesis_config.epoch_schedule = EpochSchedule::without_warmup();
+        genesis_config.rent = Rent::default();
+
+        let leader_node_pubkey = validator_keypairs[0].node_keypair.pubkey();
+        let leader_vote_pubkey = validator_keypairs[0].vote_keypair.pubkey();
+        let reward_vote_pubkey = validator_keypairs[1].vote_keypair.pubkey();
+        let final_only_vote_pubkey = validator_keypairs[2].vote_keypair.pubkey();
+        let slot_leader = SlotLeader {
+            id: leader_node_pubkey,
+            vote_address: leader_vote_pubkey,
+        };
+
+        let (prev_bank, _bank_forks) = new_bank_for_tests(slot_leader, &genesis_config);
+        let current_slot = prev_bank
+            .epoch_schedule
+            .get_first_slot_in_epoch(prev_bank.epoch() + 1)
+            + NUM_SLOTS_FOR_REWARD;
+        let bank = new_bank_from_parent(prev_bank.clone(), current_slot);
+        let reward_slot = current_slot - NUM_SLOTS_FOR_REWARD;
+
+        let cert_rank = {
+            let rank_map = bank
+                .epoch_stakes_from_slot(bank.slot())
+                .unwrap()
+                .bls_pubkey_to_rank_map();
+            (0..rank_map.len())
+                .find_map(|rank| {
+                    rank_map.get_pubkey_stake_entry(rank).and_then(|entry| {
+                        (entry.vote_account_pubkey == final_only_vote_pubkey).then_some(rank)
+                    })
+                })
+                .unwrap()
+        };
+        let final_cert = build_fast_finalization_cert(&bank, &[cert_rank]);
+        let (signers, finalize_cert, _) = final_cert.clone().into_parts();
+        let final_cert_input = Some((&signers, finalize_cert.cert_type.slot()));
+
+        calc_vote_rewards_update_vote_states(
+            &bank,
+            Some(ValidatedRewardCert::new_for_tests(
+                reward_slot,
+                vec![reward_vote_pubkey],
+            )),
+            final_cert_input,
+        )
+        .unwrap();
+
+        let final_only_vote_state = vote_state_from_bank(&bank, &final_only_vote_pubkey);
+        assert_eq!(final_only_vote_state.root_slot(), Some(final_cert.slot()));
+        assert_eq!(final_only_vote_state.votes().len(), 1);
+        assert_eq!(
+            final_only_vote_state.votes().front().unwrap().lockout.slot(),
+            final_cert.slot()
+        );
+        assert!(final_only_vote_state.epoch_credits().is_empty());
+    }
+
+    #[test]
     fn leader_with_multiple_vote_accounts_not_paid() {
         let num_validators = 5;
         let per_validator_stake = LAMPORTS_PER_SOL * 100;
