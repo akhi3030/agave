@@ -91,6 +91,9 @@ impl AggregateAccumulator {
         cert_type: CertificateType,
         total_stake: NonZero<u64>,
     ) -> Result<Option<Certificate>, AggregateAccumulatorError> {
+        if self.is_identity() {
+            return Ok(None);
+        }
         let observed_fraction = Fraction::new(self.stake, total_stake);
         if observed_fraction < cert_type.threshold() {
             return Ok(None);
