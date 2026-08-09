@@ -87,11 +87,12 @@ impl CertsBuilder {
         match input {
             RewardInput::External(aggregates) => {
                 for aggregate in aggregates {
-                    let slot = aggregate.vote().slot();
-                    let Some(rank_map) = root_bank.get_rank_map(slot) else {
+                    let vote = *aggregate.vote();
+                    let vote_slot = vote.slot();
+                    let Some(rank_map) = root_bank.get_rank_map(vote_slot) else {
                         warn!(
-                            "failed to look up rank_map for slot {slot} using bank for slot {}",
-                            root_bank.slot()
+                            "failed to look up rank_map for slot {vote_slot} using bank for slot \
+                             {root_slot}"
                         );
                         return;
                     };
@@ -104,10 +105,9 @@ impl CertsBuilder {
                         vote_account_pubkeys.push(stake_entry.vote_account_pubkey);
                     }
 
-                    let vote = *aggregate.vote();
                     match self
                         .aggregates
-                        .entry(aggregate.vote().slot())
+                        .entry(vote_slot)
                         .or_insert_with(|| Entry::new(max_validators))
                         .add_aggregate(aggregate, vote_account_pubkeys)
                     {
@@ -119,10 +119,11 @@ impl CertsBuilder {
                 }
             }
             RewardInput::Own(vote_msg) => {
-                let slot = vote_msg.vote.slot();
-                let Some(rank_map) = root_bank.get_rank_map(slot) else {
+                let vote = vote_msg.vote;
+                let vote_slot = vote.slot();
+                let Some(rank_map) = root_bank.get_rank_map(vote_slot) else {
                     warn!(
-                        "failed to look up rank_map for slot {slot} using bank for slot {}",
+                        "failed to look up rank_map for slot {vote_slot} using bank for slot {}",
                         root_bank.slot()
                     );
                     return;
@@ -133,10 +134,9 @@ impl CertsBuilder {
                     return;
                 };
 
-                let vote = vote_msg.vote;
                 match self
                     .aggregates
-                    .entry(vote_msg.vote.slot())
+                    .entry(vote_slot)
                     .or_insert_with(|| Entry::new(max_validators))
                     .add_own_msg(vote_msg, stake_entry.vote_account_pubkey)
                 {
